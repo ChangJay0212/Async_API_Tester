@@ -1,4 +1,4 @@
-import concurrent.futures
+import asyncio
 import os
 import statistics
 import threading
@@ -21,13 +21,13 @@ class TESTER:
     ):
         self.virtual_user = virtual_user
         self.http_timeout = http_timeout
-        self.url = self._veridt_url(url=url, port=port)
+        self.url = self._verify_url(url=url, port=port)
         self.test_duration = test_duration
         self.method = method
         self.api_requests = api_requests
         self.save_path = self._verify_save_path(save_path)
 
-    def _veridt_url(self, url: str, port: int):
+    def _verify_url(self, url: str, port: int):
         test_ollama = f"http://{url}:{port}"
         try:
             response = httpx.get(test_ollama, timeout=10)
@@ -44,79 +44,88 @@ class TESTER:
             os.makedirs(path)
         return path
 
-    def chat_stream(self, request_data: dict) -> str:
+    async def chat_stream(self, client: httpx.AsyncClient, request_data: dict):
         try:
-            with httpx.stream(
+            response = await client.request(
                 self.method,
                 self.url,
                 json=request_data,
                 timeout=self.http_timeout,
-            ) as response:
-                response.encoding = "utf-8"
-                return response
-        except BaseException as e:
-            return f"Error occurred: {str(e)}\n\n"
-
-    def _handle_results(self, futures, results, metrics, stop_event):
-        while not stop_event.is_set() or futures:
-            completed_futures = []
-            try:
-                completed_futures = [
-                    f for f in concurrent.futures.as_completed(futures, timeout=1)
-                ]
-            except concurrent.futures.TimeoutError:
-                pass
-
-            for future in completed_futures:
-                try:
-                    result = future.result()
-                    results.append(result)
-                    if isinstance(result, httpx.Response) and result.status_code == 200:
-                        metrics["successful_requests"] += 1
-                        metrics["response_times"].append(
-                            result.elapsed.total_seconds() * 1000
-                        )
-                    else:
-                        metrics["error_requests"] += 1
-                except Exception:
-                    results.append((None, None))
-                    metrics["error_requests"] += 1
-                futures.remove(future)
-
-            if stop_event.is_set():
-                futures.clear()
-
-    def make_requests(self, payload=None, duration=600, users=10, stop_event=None):
-        end_time = time.time() + duration
-        results = []
-        metrics = {"successful_requests": 0, "error_requests": 0, "response_times": []}
-        futures = set()
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=users) as executor:
-            result_thread = threading.Thread(
-                target=self._handle_results,
-                args=(futures, results, metrics, stop_event),
             )
-            result_thread.start()
+            if response.status_code == 200:
+                pass
+            return response
+        except httpx.RequestError as e:
+            if isinstance(e, httpx.TimeoutException):
+                pass
+            else:
+                pass
+            return None
 
-            try:
-                while not stop_event.is_set() and time.time() < end_time:
-                    new_futures = [
-                        executor.submit(self.chat_stream, p) for p in payload
-                    ]
+    async def process_response(self, task, metrics):
+        try:
+            result = await task
+            if isinstance(result, httpx.Response) and result.status_code == 200:
+                metrics["successful_requests"] += 1
+                metrics["response_times"].append(result.elapsed.total_seconds())
+            elif isinstance(result, httpx.Response):
+                metrics["error_requests"] += 1
+            elif result is None:
+                metrics["canceled_requests"] += 1
+            else:
+                metrics["error_requests"] += 1
+        except asyncio.CancelledError:
+            metrics["canceled_requests"] += 1
+        except Exception as e:
+            print(f"Unexpected error occurred: {str(e)}")
+            metrics["error_requests"] += 1
 
-                    if result_thread.is_alive():
-                        futures.update(new_futures)
-                    else:
-                        break
-                    time.sleep(0.1)
-            finally:
-                stop_event.set()
-                result_thread.join()
+    async def make_requests(self, payload, duration, users, stop_event):
+        start_time = time.time()
+        end_time = start_time + duration
+        metrics = {
+            "successful_requests": 0,
+            "error_requests": 0,
+            "canceled_requests": 0,
+            "response_times": [],
+        }
+        tasks = []
 
-        total_requests = metrics["successful_requests"] + metrics["error_requests"]
+        async with httpx.AsyncClient() as client:
+            while not stop_event.is_set() and time.time() < end_time:
+                for p in payload:
+                    if len(tasks) >= users:
+                        # Wait for any of the tasks to complete if we've reached the user limit
+                        done, pending = await asyncio.wait(
+                            tasks, return_when=asyncio.FIRST_COMPLETED
+                        )
+                        tasks = list(pending)
+                        for task in done:
+                            asyncio.create_task(self.process_response(task, metrics))
+                    # Submit new requests
+                    tasks.append(asyncio.create_task(self.chat_stream(client, p)))
+                await asyncio.sleep(0.1)
+
+            # Cancel all pending tasks when the time is up
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+                    metrics["canceled_requests"] += 1
+
+            # Wait for remaining tasks to complete
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.ALL_COMPLETED)
+            for task in done:
+                if not task.cancelled():
+                    await self.process_response(task, metrics)
+
+        total_requests = (
+            metrics["successful_requests"]
+            + metrics["error_requests"]
+            + metrics["canceled_requests"]
+        )
+
         requests_per_sec = (
-            total_requests / (sum(metrics["response_times"]) / 1000)
+            metrics["successful_requests"] / self.test_duration
             if metrics["response_times"]
             else 0
         )
@@ -144,82 +153,106 @@ class TESTER:
             "min_response_time": min_response_time,
             "max_response_time": max_response_time,
             "error_percentage": error_percentage,
+            "canceled_requests": metrics["canceled_requests"],
         }
 
     def run(self):
         all_metrics = {}
         stop_event = threading.Event()
 
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = {
-                executor.submit(
-                    self.make_requests,
-                    payload,
-                    self.test_duration,
-                    self.virtual_user,
-                    stop_event,
-                ): model
-                for model, payload in self.api_requests.items()
-            }
-            try:
-                start_time = time.time()
-                while time.time() - start_time < self.test_duration:
-                    time.sleep(1)
-                    print(
-                        f"Start evaluate : {int(time.time() - start_time)}/{self.test_duration} (s) "
+        # def countdown_timer():
+        #     start_time = time.time()
+        #     while not stop_event.is_set():
+        #         elapsed_time = time.time() - start_time
+        #         remaining_time = self.test_duration - elapsed_time
+        #         if remaining_time < 0:
+        #             break
+        #         print(
+        #             f"Elapsed Time: {elapsed_time:.2f}s / {self.test_duration}s, Remaining Time: {remaining_time:.2f}s",
+        #             end="\r",
+        #             file=sys.stdout,
+        #         )
+        #         time.sleep(1)
+
+        # timer_thread = threading.Thread(target=countdown_timer)
+        # timer_thread.start()
+
+        async def run_tests():
+            tasks = []
+            for model, payload in self.api_requests.items():
+                tasks.append(
+                    self.make_requests(
+                        payload, self.test_duration, self.virtual_user, stop_event
                     )
-            except KeyboardInterrupt:
-                stop_event.set()
-
-            stop_event.set()
-            print("Start calculate Metrics! ")
-
-            for future in futures:
-                try:
-                    model_name = futures[future]
-                    print(model_name)
-                    metrics = future.result()
-
-                    all_metrics[model_name] = metrics
-                    print(all_metrics[model_name])
-                except Exception as e:
-                    print(f"Error occurred for model {model_name}: {str(e)}")
-
-        print("Saving result... ")
-        for model_name, metrics in all_metrics.items():
-            with open(
-                os.path.join(
-                    self.save_path,
-                    f"api_metrics_{model_name.replace('/', '_').replace(':', '_')}.txt",
-                ),
-                "w",
-            ) as f:
-                f.write(f"Model: {model_name}\n")
-                f.write(f"Total requests sent: {metrics['total_requests_sent']}\n")
-                f.write(f"Requests/s: {metrics['requests_per_second']:.2f}\n")
-                f.write(
-                    f"Avg. response time (ms): {metrics['avg_response_time']:.2f}\n"
                 )
-                f.write(f"Min(ms): {metrics['min_response_time']:.2f}\n")
-                f.write(f"Max(ms): {metrics['max_response_time']:.2f}\n")
-                f.write(f"Error %: {metrics['error_percentage']:.2f}%\n")
-                f.write("\n")
+            results = await asyncio.gather(*tasks)
+            stop_event.set()
+            # timer_thread.join()
 
-        print("End ")
+            for model, metrics in zip(self.api_requests.keys(), results):
+                all_metrics[model] = metrics
+                print(all_metrics[model])
+
+            # Save results to file
+            print("Saving result...")
+            for model_name, metrics in all_metrics.items():
+                with open(
+                    os.path.join(
+                        self.save_path,
+                        f"api_metrics_{model_name.replace('/', '_').replace(':', '_')}.txt",
+                    ),
+                    "w",
+                ) as f:
+                    f.write(f"Model: {model_name}\n")
+                    f.write(f"Total requests sent: {metrics['total_requests_sent']}\n")
+                    f.write(f"Requests/s: {metrics['requests_per_second']:.2f}\n")
+                    f.write(
+                        f"Avg. response time (ms): {metrics['avg_response_time']:.2f}\n"
+                    )
+                    f.write(f"Min(ms): {metrics['min_response_time']:.2f}\n")
+                    f.write(f"Max(ms): {metrics['max_response_time']:.2f}\n")
+                    f.write(f"Error %: {metrics['error_percentage']:.2f}%\n")
+                    f.write(f"Canceled requests: {metrics['canceled_requests']}\n")
+                    f.write("\n")
+
+            print("End")
+
+        asyncio.run(run_tests())
 
 
 if __name__ == "__main__":
     api_requests = {
-        "llama3:latest": [
+        "llama3.1:latest": [
             {
-                "model": "llama3:latest",
+                "model": "llama3.1:latest",
                 "messages": [{"role": "user", "content": "how r u?"}],
                 "stream": False,
             }
         ],
-        "llama3.1:latest": [
+        "qwen2.5:1.5b": [
             {
-                "model": "llama3.1:latest",
+                "model": "qwen2.5:1.5b",
+                "messages": [{"role": "user", "content": "how r u?"}],
+                "stream": False,
+            }
+        ],
+        "llama3.2:1b": [
+            {
+                "model": "llama3.2:1b",
+                "messages": [{"role": "user", "content": "how r u?"}],
+                "stream": False,
+            }
+        ],
+        "llama3.2-vision:latest": [
+            {
+                "model": "llama3.2-vision:latest",
+                "messages": [{"role": "user", "content": "how r u?"}],
+                "stream": False,
+            }
+        ],
+        "llama3:latest": [
+            {
+                "model": "llama3:latest",
                 "messages": [{"role": "user", "content": "how r u?"}],
                 "stream": False,
             }
@@ -228,9 +261,9 @@ if __name__ == "__main__":
 
     tester = TESTER(
         api_requests=api_requests,
-        url="10.204.16.75",
-        test_duration=2,
-        http_timeout=3,
-        virtual_user=1,
+        url="172.17.0.3",
+        test_duration=5,
+        http_timeout=60,
+        virtual_user=20,
     )
     tester.run()
