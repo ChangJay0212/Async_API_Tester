@@ -3,6 +3,8 @@ import os
 import statistics
 import threading
 import time
+from multiprocessing import Process
+from typing import Union
 
 import httpx
 
@@ -19,6 +21,19 @@ class TESTER:
         url: str = "10.204.16.75",
         save_path: str = "./result",
     ):
+        """
+        Initialize the TESTER class for performing API stress tests.
+
+        Args:
+            api_requests (dict): Dictionary containing API request payloads.
+            test_duration (int): Duration of the test in seconds. Default is 600.
+            virtual_user (int): Number of virtual users to simulate. Default is 20.
+            http_timeout (int): Timeout for HTTP requests in seconds. Default is 60.
+            port (int): Port number to be used for the URL. Default is 11434.
+            method (str): HTTP method to be used (e.g., 'POST'). Default is 'POST'.
+            url (str): Base URL for the API requests.
+            save_path (str): Directory path to save the results.
+        """
         self.virtual_user = virtual_user
         self.http_timeout = http_timeout
         self.url = self._verify_url(url=url, port=port)
@@ -27,7 +42,17 @@ class TESTER:
         self.api_requests = api_requests
         self.save_path = self._verify_save_path(save_path)
 
-    def _verify_url(self, url: str, port: int):
+    def _verify_url(self, url: str, port: int) -> str:
+        """
+        Verify if the URL is reachable and return the formatted URL.
+
+        Args:
+            url (str): The base URL.
+            port (int): The port number to be used.
+
+        Returns:
+            str: The formatted URL with the specified port.
+        """
         test_ollama = f"http://{url}:{port}"
         try:
             response = httpx.get(test_ollama, timeout=10)
@@ -39,12 +64,33 @@ class TESTER:
             print(f"An error occurred: {e}")
         return f"http://{url}:{port}/api/chat"
 
-    def _verify_save_path(self, path: str):
+    def _verify_save_path(self, path: str) -> str:
+        """
+        Verify if the save path exists, and create it if it does not.
+
+        Args:
+            path (str): The directory path to save the results.
+
+        Returns:
+            str: The verified save path.
+        """
         if not os.path.isdir(path):
             os.makedirs(path)
         return path
 
-    async def chat_stream(self, client: httpx.AsyncClient, request_data: dict):
+    async def chat_stream(
+        self, client: httpx.AsyncClient, request_data: dict
+    ) -> Union[httpx.Response, None]:
+        """
+        Perform an asynchronous HTTP request to the chat API.
+
+        Args:
+            client (httpx.AsyncClient): The HTTP client to be used for the request.
+            request_data (dict): The data to be sent in the request.
+
+        Returns:
+            Union[httpx.Response, None]: The response object if successful, otherwise None.
+        """
         try:
             response = await client.request(
                 self.method,
@@ -62,7 +108,14 @@ class TESTER:
                 pass
             return None
 
-    async def process_response(self, task, metrics):
+    async def process_response(self, task, metrics: dict) -> None:
+        """
+        Process the response from an asynchronous task and update the metrics.
+
+        Args:
+            task: The asyncio task to be processed.
+            metrics (dict): Dictionary to store metrics such as successful requests, errors, etc.
+        """
         try:
             result = await task
             if isinstance(result, httpx.Response) and result.status_code == 200:
@@ -80,7 +133,21 @@ class TESTER:
             print(f"Unexpected error occurred: {str(e)}")
             metrics["error_requests"] += 1
 
-    async def make_requests(self, payload, duration, users, stop_event):
+    async def make_requests(
+        self, payload: list, duration: int, users: int, stop_event: threading.Event
+    ) -> dict:
+        """
+        Make concurrent requests to the API for the given duration and track metrics.
+
+        Args:
+            payload (list): List of request payloads to be sent.
+            duration (int): Duration for which the requests should be made.
+            users (int): Number of concurrent users to simulate.
+            stop_event (threading.Event): Event to signal stopping the requests.
+
+        Returns:
+            dict: Dictionary containing metrics for the requests.
+        """
         start_time = time.time()
         end_time = start_time + duration
         metrics = {
@@ -156,26 +223,12 @@ class TESTER:
             "canceled_requests": metrics["canceled_requests"],
         }
 
-    def run(self):
+    def run(self) -> None:
+        """
+        Run the API stress tests and collect metrics.
+        """
         all_metrics = {}
         stop_event = threading.Event()
-
-        # def countdown_timer():
-        #     start_time = time.time()
-        #     while not stop_event.is_set():
-        #         elapsed_time = time.time() - start_time
-        #         remaining_time = self.test_duration - elapsed_time
-        #         if remaining_time < 0:
-        #             break
-        #         print(
-        #             f"Elapsed Time: {elapsed_time:.2f}s / {self.test_duration}s, Remaining Time: {remaining_time:.2f}s",
-        #             end="\r",
-        #             file=sys.stdout,
-        #         )
-        #         time.sleep(1)
-
-        # timer_thread = threading.Thread(target=countdown_timer)
-        # timer_thread.start()
 
         async def run_tests():
             tasks = []
@@ -187,7 +240,6 @@ class TESTER:
                 )
             results = await asyncio.gather(*tasks)
             stop_event.set()
-            # timer_thread.join()
 
             for model, metrics in zip(self.api_requests.keys(), results):
                 all_metrics[model] = metrics
@@ -220,7 +272,23 @@ class TESTER:
         asyncio.run(run_tests())
 
 
-def run_tester(api_requests, url, test_duration, http_timeout, virtual_user):
+def run_tester(
+    api_requests: dict,
+    url: str,
+    test_duration: int,
+    http_timeout: int,
+    virtual_user: int,
+) -> None:
+    """
+    Run the tester with the provided parameters.
+
+    Args:
+        api_requests (dict): Dictionary containing API request payloads.
+        url (str): The base URL for the API requests.
+        test_duration (int): Duration of the test in seconds.
+        http_timeout (int): Timeout for HTTP requests in seconds.
+        virtual_user (int): Number of virtual users to simulate.
+    """
     tester = TESTER(
         api_requests=api_requests,
         url=url,
@@ -254,13 +322,13 @@ if __name__ == "__main__":
                 "stream": False,
             }
         ],
-        # "llama3.2-vision:latest": [
-        #     {
-        #         "model": "llama3.2-vision:latest",
-        #         "messages": [{"role": "user", "content": "how r u?"}],
-        #         "stream": False,
-        #     }
-        # ],
+        "llama3.2-vision:latest": [
+            {
+                "model": "llama3.2-vision:latest",
+                "messages": [{"role": "user", "content": "how r u?"}],
+                "stream": False,
+            }
+        ],
         "llama3:latest": [
             {
                 "model": "llama3:latest",
@@ -269,9 +337,7 @@ if __name__ == "__main__":
             }
         ],
     }
-    from multiprocessing import Process
 
-    # 使用多进程分别启动每个 API 的测试
     processes = []
     for model_name, request_payload in api_requests.items():
         p = Process(
@@ -287,6 +353,5 @@ if __name__ == "__main__":
         processes.append(p)
         p.start()
 
-    # 等待所有进程完成
     for p in processes:
         p.join()
