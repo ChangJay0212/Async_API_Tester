@@ -259,10 +259,10 @@ class TESTER:
                     f.write(f"Total requests sent: {metrics['total_requests_sent']}\n")
                     f.write(f"Requests/s: {metrics['requests_per_second']:.2f}\n")
                     f.write(
-                        f"Avg. response time (ms): {metrics['avg_response_time']:.2f}\n"
+                        f"Avg. response time (s): {metrics['avg_response_time']:.2f}\n"
                     )
-                    f.write(f"Min(ms): {metrics['min_response_time']:.2f}\n")
-                    f.write(f"Max(ms): {metrics['max_response_time']:.2f}\n")
+                    f.write(f"Min(s): {metrics['min_response_time']:.2f}\n")
+                    f.write(f"Max(s): {metrics['max_response_time']:.2f}\n")
                     f.write(f"Error %: {metrics['error_percentage']:.2f}%\n")
                     f.write(f"Canceled requests: {metrics['canceled_requests']}\n")
                     f.write("\n")
