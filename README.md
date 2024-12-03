@@ -1,6 +1,7 @@
 # Ollama High-Load Performance Tester
 
 ## Overview
+![SVG Image](./docs/architecture.svg)
 The **Ollama High-Load Performance Tester** is a tool specifically designed to benchmark Ollama's API under high load conditions. It measures key performance metrics such as response time, request rate, and error percentage, providing insights into Ollama's API performance when handling multiple concurrent requests. This tool is particularly useful for stress testing and validating the robustness of Ollama's deployment.
 
 ## Features

@@ -220,6 +220,17 @@ class TESTER:
         asyncio.run(run_tests())
 
 
+def run_tester(api_requests, url, test_duration, http_timeout, virtual_user):
+    tester = TESTER(
+        api_requests=api_requests,
+        url=url,
+        test_duration=test_duration,
+        http_timeout=http_timeout,
+        virtual_user=virtual_user,
+    )
+    tester.run()
+
+
 if __name__ == "__main__":
     api_requests = {
         "llama3.1:latest": [
@@ -243,13 +254,13 @@ if __name__ == "__main__":
                 "stream": False,
             }
         ],
-        "llama3.2-vision:latest": [
-            {
-                "model": "llama3.2-vision:latest",
-                "messages": [{"role": "user", "content": "how r u?"}],
-                "stream": False,
-            }
-        ],
+        # "llama3.2-vision:latest": [
+        #     {
+        #         "model": "llama3.2-vision:latest",
+        #         "messages": [{"role": "user", "content": "how r u?"}],
+        #         "stream": False,
+        #     }
+        # ],
         "llama3:latest": [
             {
                 "model": "llama3:latest",
@@ -258,12 +269,24 @@ if __name__ == "__main__":
             }
         ],
     }
+    from multiprocessing import Process
 
-    tester = TESTER(
-        api_requests=api_requests,
-        url="172.17.0.3",
-        test_duration=5,
-        http_timeout=60,
-        virtual_user=20,
-    )
-    tester.run()
+    # 使用多进程分别启动每个 API 的测试
+    processes = []
+    for model_name, request_payload in api_requests.items():
+        p = Process(
+            target=run_tester,
+            args=(
+                {model_name: request_payload},
+                "172.17.0.3",
+                600,
+                60,
+                20,
+            ),
+        )
+        processes.append(p)
+        p.start()
+
+    # 等待所有进程完成
+    for p in processes:
+        p.join()
